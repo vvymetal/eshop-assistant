@@ -33,7 +33,6 @@ starlette==0.37.2
 tqdm==4.66.5
 typing_extensions==4.12.2
 uvicorn==0.30.5
-fastapi
-uvicorn
 openai
-pytest
+pydantic
+pydantic-settings
