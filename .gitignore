@@ -1,0 +1,13 @@
+# Ignorovat virtuální prostředí
+venv/
+
+# Ignorovat Python bytecode
+__pycache__/
+*.pyc
+
+# Ignorovat lokální konfigurační soubory
+.env
+
+# Ignorovat soubory IDE (pokud používáte)
+.vscode/
+.idea/
