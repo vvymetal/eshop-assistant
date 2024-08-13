@@ -1,20 +1,25 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from ..services.ai_service import AIService
-from ..models.chat import ChatRequest
+from app.services.ai_service import AiService
+import asyncio
 
 router = APIRouter()
+ai_service = AiService()
 
-@router.post("/chat")
-async def chat(request: ChatRequest):
-    ai_service = AIService()
-    conversation_service = ConversationService()
-
-    async def event_stream():
-        async for chunk in ai_service.get_ai_response(request.message, request.customer_info):
-            yield f"data: {chunk}\n\n"
+@router.get("/chat")
+async def chat_endpoint(request: Request, message: str):
+    async def event_generator():
+        run_id = await ai_service.send_message(message)
         
-        # Uložení konverzace
-        conversation_service.save_conversation(request.customer_info, request.message, "AI response")
+        while True:
+            if await request.is_disconnected():
+                break
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+            response = await ai_service.get_response(run_id)
+            if response:
+                yield f"data: {response}\n\n"
+                break
+            
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

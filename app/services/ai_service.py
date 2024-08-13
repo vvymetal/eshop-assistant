@@ -1,21 +1,42 @@
 import openai
 from app.core.config import settings
 
-openai.api_key = settings.OPENAI_API_KEY
+class AiService:
+    def __init__(self):
+        openai.api_key = settings.OPENAI_API_KEY
+        self.assistant_id = settings.ASSISTANT_ID
+        self.thread = None
 
-class AIService:
-    @staticmethod
-    async def get_response(message: str, context: dict):
-        try:
-            response = await openai.ChatCompletion.acreate(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a helpful e-shop assistant."},
-                    {"role": "user", "content": message}
-                ],
-                max_tokens=150
-            )
-            return response.choices[0].message['content']
-        except Exception as e:
-            print(f"Error in AI Service: {str(e)}")
-            return "I'm sorry, I'm having trouble processing your request."
+    async def create_thread(self):
+        self.thread = await openai.beta.threads.create()
+        return self.thread.id
+
+    async def send_message(self, message: str):
+        if not self.thread:
+            await self.create_thread()
+
+        await openai.beta.threads.messages.create(
+            thread_id=self.thread.id,
+            role="user",
+            content=message
+        )
+
+        run = await openai.beta.threads.runs.create(
+            thread_id=self.thread.id,
+            assistant_id=self.assistant_id
+        )
+
+        return run.id
+
+    async def get_response(self, run_id: str):
+        run = await openai.beta.threads.runs.retrieve(
+            thread_id=self.thread.id,
+            run_id=run_id
+        )
+
+        if run.status == 'completed':
+            messages = await openai.beta.threads.messages.list(thread_id=self.thread.id)
+            assistant_message = next(msg for msg in messages if msg.role == 'assistant')
+            return assistant_message.content[0].text.value
+        
+        return None

@@ -11,3 +11,4 @@ __pycache__/
 # Ignorovat soubory IDE (pokud používáte)
 .vscode/
 .idea/
+.env
