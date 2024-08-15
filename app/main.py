@@ -5,15 +5,16 @@ from fastapi.staticfiles import StaticFiles
 from backend.app.api import products, cart
 from backend.app.api.routes import chat
 from backend.app.core.config import settings
+from dotenv import load_dotenv
+
+
+load_dotenv()  # This loads the environment variables from .env
 
 app = FastAPI(title=settings.PROJECT_NAME)
 
-
-
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000", "http://localhost:8000"],
+    allow_origins=settings.ALLOWED_ORIGINS_LIST,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
