@@ -1,45 +1,35 @@
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from backend.app.services.ai_service import AIService
 import logging
-import asyncio
 import json
-from typing import AsyncGenerator
 
 router = APIRouter()
-ai_service = AIService()
 
-@router.on_event("startup")
-async def startup_event():
-    await ai_service.create_assistant("E-shop Assistant", "You are an assistant helping customers with their purchases.")
-    await ai_service.create_thread()
+@router.get("/stream")
+async def stream_message(request: Request, ai_service: AIService = Depends(AIService)):
+    logging.info("Received stream request")
+    try:
+        message = request.query_params.get('message')
+        context_str = request.query_params.get('context', '[]')
+        
+        if not message:
+            raise HTTPException(status_code=400, detail="Message is required")
+        
+        context = json.loads(context_str)
+        
+        logging.info(f'Streaming message: {message}')
+        logging.info(f'Context: {context}')
 
-@router.get("/")
-async def get_chat_status():
-    return {"status": "Chat is ready"}
-
-@router.post("/")
-async def send_message(request: Request):
-    data = await request.json()
-    message = data.get('message')
-    await ai_service.add_message_to_thread(message)
-    response = await ai_service.run_assistant()
-    logging.info(f'Controller response: {response}')
-    return {"response": response}
-
-@router.post("/stream")
-async def stream_message(request: Request):
-    data = await request.json()
-    message = data.get('message')
-    context = data.get('context', [])
-    
-    for msg in context:
-        await ai_service.add_message_to_thread(msg['content'], msg['role'])
-    
-    await ai_service.add_message_to_thread(message)
-
-    async def event_generator():
-        async for response_chunk in ai_service.run_assistant():
-            yield f"data: {json.dumps({'content': response_chunk})}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+        for msg in context:
+            await ai_service.add_message_to_thread(msg['content'], msg['role'])
+        
+        await ai_service.add_message_to_thread(message)
+        
+        return StreamingResponse(ai_service.run_assistant_stream(), media_type="text/event-stream")
+    except json.JSONDecodeError:
+        logging.error("Invalid JSON in context parameter")
+        raise HTTPException(status_code=400, detail="Invalid context format")
+    except Exception as e:
+        logging.error(f"Error in stream_message: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
