@@ -1,104 +1,142 @@
-from fastapi import APIRouter, Request, Depends, HTTPException
+from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
-from backend.app.services.ai_service import AIService, ConversationManager
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
+from backend.app.core.config import settings
 import logging
 import json
 import asyncio
-from backend.app.services.ai_service import AIService, ChatEventHandler
-from backend.app.core.event_handler import ChatEventHandler
-from backend.app.services.ai_service import AIService
-from backend.app.services.tool_call_handler import ToolCallHandler
-from backend.app.services.product_service import ProductService
-from backend.app.services.cart_service import CartService
+from openai import OpenAI
+from openai.types.beta.threads import Run
+from typing_extensions import override
 
 router = APIRouter()
+
+class AIService:
+    def __init__(self, api_key: Optional[str] = None, model: str = "gpt-4-turbo-preview"):
+        self.client = OpenAI(api_key=api_key or settings.OPENAI_API_KEY)
+        self.model = model
+        self.assistant = self.create_assistant()
+
+    def create_assistant(self):
+        return self.client.beta.assistants.create(
+            name="eShop Assistant",
+            instructions="You are an AI assistant for an e-commerce platform. Help users find products, manage their cart, and answer questions about the shopping process.",
+            tools=self.default_tools(),
+            model=self.model
+        )
+
+    def default_tools(self):
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_product_info",
+                    "description": "Get information about a specific product",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "product_id": {"type": "string", "description": "The ID of the product"}
+                        },
+                        "required": ["product_id"]
+                    }
+                }
+            },
+            # Add other tools here...
+        ]
+
+    def create_thread(self):
+        return self.client.beta.threads.create()
+
+    def add_message_to_thread(self, thread_id: str, role: str, content: str):
+        return self.client.beta.threads.messages.create(
+            thread_id=thread_id,
+            role=role,
+            content=content
+        )
+
+    def run_assistant(self, thread_id: str, instructions: str = None):
+        return self.client.beta.threads.runs.create(
+            thread_id=thread_id,
+            assistant_id=self.assistant.id,
+            instructions=instructions
+        )
+
+    def get_run_status(self, thread_id: str, run_id: str) -> Run:
+        return self.client.beta.threads.runs.retrieve(
+            thread_id=thread_id,
+            run_id=run_id
+        )
+
+    def get_messages(self, thread_id: str):
+        return self.client.beta.threads.messages.list(thread_id=thread_id)
+
+class EventHandler:
+    def __init__(self, handle_chunk_func):
+        self.handle_chunk_func = handle_chunk_func
+
+    @override
+    def on_text_created(self, text) -> None:
+        self.handle_chunk_func({"type": "start", "content": ""})
+
+    @override
+    def on_text_delta(self, delta, snapshot):
+        self.handle_chunk_func({"type": "stream", "content": delta.value})
+
+    def on_tool_call_created(self, tool_call):
+        self.handle_chunk_func({"type": "tool_call", "content": str(tool_call)})
+
+    def on_tool_call_delta(self, delta, snapshot):
+        self.handle_chunk_func({"type": "tool_call_delta", "content": str(delta)})
+
+    @classmethod
+    def on_end(cls):
+        print("\n\nAll streams have ended.")
+
 ai_service = AIService()
-product_service = ProductService()
-cart_service = CartService()
-tool_call_handler = ToolCallHandler(product_service, cart_service)
-
-
-class MessageCreate(BaseModel):
-    message: str
-
-ai_service = AIService()
-conversation_manager = ConversationManager(ai_service)
 
 @router.post("/start")
 async def start_chat():
-    thread_id = conversation_manager.start_conversation()
-    return {"thread_id": thread_id}
-
-@router.post("/{thread_id}/send")
-async def send_message(thread_id: str, message: MessageCreate):
-    if not conversation_manager.get_conversation(thread_id):
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    conversation_manager.add_message(thread_id, "user", message.message)
-    return {"status": "Message sent"}
+    thread = ai_service.create_thread()
+    return {"thread_id": thread.id}
 
 @router.get("/stream")
 async def stream_message(request: Request):
     logging.info("Received stream request")
     try:
         message = request.query_params.get('message')
-        context_str = request.query_params.get('context', '[]')
         thread_id = request.query_params.get('thread_id')
         instructions = request.query_params.get('instructions')
 
         if not message or not thread_id:
             raise HTTPException(status_code=400, detail="Message and thread_id are required")
 
-        context = json.loads(context_str)
-
         logging.info(f'Streaming message: {message}')
-        logging.info(f'Context: {context}')
         logging.info(f'Thread ID: {thread_id}')
         logging.info(f'Instructions: {instructions}')
 
-        conversation = conversation_manager.get_conversation(thread_id)
-        if not conversation:
-            raise HTTPException(status_code=404, detail="Conversation not found")
-
-        for msg in context:
-            conversation_manager.add_message(thread_id, msg['role'], msg['content'])
-
-        conversation_manager.add_message(thread_id, "user", message)
+        ai_service.add_message_to_thread(thread_id, "user", message)
 
         async def event_generator():
-            queue = asyncio.Queue()
+            run = ai_service.run_assistant(thread_id, instructions)
             
-            async def send_func(data):
-                await queue.put(data)
-
-            event_handler = ChatEventHandler(send_func)
-
-            # Vytvoříme stream bez použití kontextového manažeru
-            stream = ai_service.client.beta.threads.runs.stream(
-                thread_id=thread_id,
-                assistant_id=ai_service.assistant_id,
-                instructions=instructions,
-                event_handler=event_handler,
-            )
-
-            # Spustíme stream a počkáme na jeho dokončení
-            await stream.until_done()
-
             while True:
-                chunk = await queue.get()
-                if chunk['type'] == 'end':
+                run_status = ai_service.get_run_status(thread_id, run.id)
+                if run_status.status == "completed":
+                    messages = ai_service.get_messages(thread_id)
+                    for message in messages.data:
+                        if message.role == "assistant":
+                            yield f"data: {json.dumps({'type': 'stream', 'content': message.content[0].text.value})}\n\n"
                     break
-                yield f"data: {json.dumps(chunk)}\n\n"
+                elif run_status.status == "failed":
+                    yield f"data: {json.dumps({'type': 'error', 'content': 'Run failed'})}\n\n"
+                    break
+                await asyncio.sleep(1)  # Poll every second
+
+            yield f"data: {json.dumps({'type': 'end', 'content': ''})}\n\n"
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
-    
 
-    except json.JSONDecodeError:
-        logging.error("Invalid JSON in context parameter")
-        raise HTTPException(status_code=400, detail="Invalid context format")
     except Exception as e:
         logging.error(f"Error in stream_message: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-    
-    
